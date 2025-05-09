@@ -35,7 +35,7 @@ int main() {
                (struct sockaddr*)&sw_addr, sizeof(sw_addr));
 
         if (i % 1000 == 0) {
-            sleep(1);
+            // sleep(1);
             printf("[SENDER] Sent %u packets\n", i);
         }
     }
