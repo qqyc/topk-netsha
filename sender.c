@@ -13,13 +13,13 @@ static uint64_t current_time_ns() {
 }
 
 int main() {
-    // 使 stdout 行缓冲
+    // 行缓冲
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in sw_addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons(SWITCH_PORT),
+        .sin_family      = AF_INET,
+        .sin_port        = htons(SWITCH_PORT),
         .sin_addr.s_addr = inet_addr("10.10.0.3")
     };
 
@@ -33,13 +33,9 @@ int main() {
         };
         sendto(sock, &pkt, sizeof(pkt), 0,
                (struct sockaddr*)&sw_addr, sizeof(sw_addr));
-
-        if (i % 1000 == 0) {
-            // sleep(1);
-            printf("[SENDER] Sent %u packets\n", i);
-        }
     }
-    // 发送 END 包两次
+
+    // 发送 END 包，等待 1s 后重发一次
     topk_pkt_t endpkt = {
         .query_id = QUERY_ID,
         .seq_num  = 1000000,
@@ -48,6 +44,7 @@ int main() {
     };
     sendto(sock, &endpkt, sizeof(endpkt), 0,
            (struct sockaddr*)&sw_addr, sizeof(sw_addr));
+    sleep(1);
     sendto(sock, &endpkt, sizeof(endpkt), 0,
            (struct sockaddr*)&sw_addr, sizeof(sw_addr));
 

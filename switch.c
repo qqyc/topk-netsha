@@ -4,12 +4,15 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <inttypes.h>
 
 static topk_pkt_t slots[P+Q];
 static topk_pkt_t outbuf[P];
 
-static uint64_t total_recv_pkts = 0;   // 用于流量统计
+static uint64_t total_recv_pkts = 0;
 static uint64_t total_fwd_pkts  = 0;
 static uint32_t sent            = 0;
 static uint32_t temp_T          = END_VALUE;
@@ -17,47 +20,52 @@ static uint32_t T_final         = END_VALUE;
 static int stage                = 1;
 static int cnt_stage2           = 0;
 
-// 手动展开冒泡插入到 slots[0..5] 保持升序
+static char *mode;
+
+// 插入到 slots[0..P+Q-1]，保持升序
 static void insert_slots_pq(topk_pkt_t pkt) {
-    slots[5] = pkt;
-    if (slots[5].value < slots[4].value) { topk_pkt_t t=slots[5]; slots[5]=slots[4]; slots[4]=t; }
-    if (slots[4].value < slots[3].value) { topk_pkt_t t=slots[4]; slots[4]=slots[3]; slots[3]=t; }
-    if (slots[3].value < slots[2].value) { topk_pkt_t t=slots[3]; slots[3]=slots[2]; slots[2]=t; }
-    if (slots[2].value < slots[1].value) { topk_pkt_t t=slots[2]; slots[2]=slots[1]; slots[1]=t; }
-    if (slots[1].value < slots[0].value) { topk_pkt_t t=slots[1]; slots[1]=slots[0]; slots[0]=t; }
+    slots[P+Q-1] = pkt;
+  #define X(i,j) \
+    if (slots[i].value < slots[j].value) { \
+      topk_pkt_t t = slots[i]; slots[i] = slots[j]; slots[j] = t; \
+    }
+  #include "slots_pq.inc"
+  #undef X
 }
 
-// 手动展开冒泡插入到 slots[0..3] 保持升序
+// 插入到 slots[0..P-1]，保持升序
 static void insert_slots_p(topk_pkt_t pkt) {
-    slots[3] = pkt;
-    if (slots[3].value < slots[2].value) { topk_pkt_t t=slots[3]; slots[3]=slots[2]; slots[2]=t; }
-    if (slots[2].value < slots[1].value) { topk_pkt_t t=slots[2]; slots[2]=slots[1]; slots[1]=t; }
-    if (slots[1].value < slots[0].value) { topk_pkt_t t=slots[1]; slots[1]=slots[0]; slots[0]=t; }
+    slots[P-1] = pkt;
+  #define X(i,j) \
+    if (slots[i].value < slots[j].value) { \
+      topk_pkt_t t = slots[i]; slots[i] = slots[j]; slots[j] = t; \
+    }
+  #include "slots_p.inc"
+  #undef X
 }
 
 // 批量转发 & 清空前 P 槽
 static void forward_and_clear(int sock, struct sockaddr_in *rcv) {
-    outbuf[0] = slots[0];
-    outbuf[1] = slots[1];
-    outbuf[2] = slots[2];
-    outbuf[3] = slots[3];
-    temp_T = outbuf[3].value;
-
-    printf("[SWITCH] 发出第 %u 批, 阈值=%u, 累计发包=%u\n",
-           sent / P + 1, temp_T, sent + P);
-
+    for (int i = 0; i < P; i++) {
+        outbuf[i] = slots[i];
+    }
+    temp_T = outbuf[P-1].value;
     sendto(sock, outbuf, sizeof(outbuf), 0,
            (struct sockaddr*)rcv, sizeof(*rcv));
     sent += P;
     total_fwd_pkts += P;
-
     // 清空前 P 个槽
-    slots[0].value = slots[1].value =
-    slots[2].value = slots[3].value = END_VALUE;
+    for (int i = 0; i < P; i++) {
+        slots[i].value = END_VALUE;
+    }
 }
 
 int main() {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    mode = getenv("MODE");
+    if (!mode) mode = "aggr";
 
     int rsock = socket(AF_INET, SOCK_DGRAM, 0),
         ssock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -73,75 +81,134 @@ int main() {
     bind(rsock, (void*)&sw_in, sizeof(sw_in));
 
     // 初始化所有 slots
-    for (int i = 0; i < P+Q; i++) slots[i].value = END_VALUE;
+    for (int i = 0; i < P+Q; i++) {
+        slots[i].value = END_VALUE;
+    }
 
     while (1) {
+        // Bypass 模式：直通前 K_TARGET 个非 END 包后退出
+        if (strcmp(mode, "bypass") == 0) {
+            topk_pkt_t pkt;
+            if (recv(rsock, &pkt, sizeof(pkt), 0) <= 0) {
+                continue;
+            }
+            if (pkt.value != END_VALUE) {
+                total_recv_pkts++;
+                sendto(ssock, &pkt, sizeof(pkt), 0,
+                       (struct sockaddr*)&rcv, sizeof(rcv));
+                total_fwd_pkts++;
+                if (total_fwd_pkts >= K_TARGET) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // 聚合模式：Stage 1 的超时切换
+        if (stage == 1) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(rsock, &rfds);
+            struct timeval tv = {1, 0};  // 1s 超时
+            int ret = select(rsock+1, &rfds, NULL, NULL, &tv);
+            if (ret == 0) {
+                // 超时，无 END 包，强制进入 Stage 2
+                T_final = temp_T;
+                fprintf(stderr,"[SWITCH] 超时切换到 Stage 2\n");
+                fprintf(stderr,"[SWITCH] 当前阈值 T_final=%u\n", T_final);
+                stage = 2;
+                for (int i = 0; i < P+Q; i++) {
+                    slots[i].value = END_VALUE;
+                }
+                continue;
+            }
+            if (ret < 0 && errno != EINTR) {
+                perror("select");
+                break;
+            }
+        }
+
         topk_pkt_t pkt;
-        recv(rsock, &pkt, sizeof(pkt), 0);
+        if (recv(rsock, &pkt, sizeof(pkt), 0) <= 0) {
+            continue;
+        }
         if (pkt.value != END_VALUE) {
             total_recv_pkts++;
         }
+
         if (stage == 1) {
-            // 结束条件：END 包 或 达到 K_TARGET
+            // 收到 END 或已满 K_TARGET 时切换
             if (pkt.value == END_VALUE || sent >= K_TARGET) {
                 T_final = temp_T;
                 stage = 2;
-                // 清空所有槽
-                for (int i = 0; i < P+Q; i++) slots[i].value = END_VALUE;
-                if (pkt.value == END_VALUE) continue;
-            }
-
-            if (stage == 1) {
-                // 插入 P+Q 槽
-                insert_slots_pq(pkt);
-                // 若前 P 槽满，批量转发
-                if (slots[3].value != END_VALUE) {
-                    forward_and_clear(ssock, &rcv);
+                for (int i = 0; i < P+Q; i++) {
+                    slots[i].value = END_VALUE;
+                }
+                if (pkt.value == END_VALUE) {
+                    continue;
                 }
             }
+            // Sort-Reduce 阶段
+            insert_slots_pq(pkt);
+            if (slots[P-1].value != END_VALUE) {
+                forward_and_clear(ssock, &rcv);
+            }
 
-        } else { // stage == 2
+        } else {
+            // 阈值过滤阶段
             if (pkt.value == END_VALUE) {
-                // 最后一批：检查所有槽中 < T_final 的，并发出
+                // 最后一批
                 int outcnt = 0;
-                #define TRY_SEND(i) \
-                  if (slots[i].value < T_final) outbuf[outcnt++] = slots[i]; \
+                #define X(i) \
+                  if (slots[i].value < T_final) { outbuf[outcnt++] = slots[i]; } \
                   if (outcnt == P) { \
-                    sendto(ssock, outbuf, sizeof(outbuf),0,(struct sockaddr*)&rcv,sizeof(rcv)); \
+                    sendto(ssock, outbuf, sizeof(outbuf), 0, (struct sockaddr*)&rcv, sizeof(rcv)); \
                     total_fwd_pkts += P; \
                     outcnt = 0; \
                   }
-                TRY_SEND(0); TRY_SEND(1); TRY_SEND(2);
-                TRY_SEND(3); TRY_SEND(4); TRY_SEND(5);
+                #include "final_flush.inc"
+                #undef X
                 if (outcnt > 0) {
-                    sendto(ssock, outbuf, sizeof(outbuf),0,(struct sockaddr*)&rcv,sizeof(rcv));
+                    sendto(ssock, outbuf, outcnt*sizeof(topk_pkt_t), 0, (struct sockaddr*)&rcv, sizeof(rcv));
                     total_fwd_pkts += outcnt;
                 }
                 break;
             }
-            // 普通包：小于 T_final 才插入 P 槽
             if (pkt.value < T_final) {
                 insert_slots_p(pkt);
                 cnt_stage2++;
                 if (cnt_stage2 == P) {
-                    sendto(ssock, outbuf, sizeof(outbuf),0,(struct sockaddr*)&rcv,sizeof(rcv));
+                    // 1) 拷贝 slots -> outbuf
+                    #define X(i) outbuf[i] = slots[i];
+                    #include "copy_p.inc"
+                    #undef X
+                  
+                    // 2) 发送
+                    sendto(ssock, outbuf, sizeof(outbuf), 0,
+                           (struct sockaddr*)&rcv, sizeof(rcv));
                     total_fwd_pkts += P;
-                    slots[0].value = slots[1].value =
-                    slots[2].value = slots[3].value = END_VALUE;
+                  
+                    // 3) 清空 slots
+                    #define X(i) slots[i].value = END_VALUE;
+                    #include "clear_p.inc"
+                    #undef X
+                  
                     cnt_stage2 = 0;
-                }
+                  }                  
             }
         }
     }
 
-    // 打印流量削减统计
+    // 最终统计
     fprintf(stderr,
         "[SWITCH-STAT] 接收包=%" PRIu64
         ", 转发包=%" PRIu64
         ", 削减比例=%.2f%%\n",
         total_recv_pkts,
         total_fwd_pkts,
-        100.0 * total_fwd_pkts / total_recv_pkts);
+        100.0 * (1.0 - (double)total_fwd_pkts / total_recv_pkts));
+    
+    fprintf(stderr,"[SWITCH] 最终阈值 T_final=%u\n", T_final);
 
     close(rsock);
     close(ssock);

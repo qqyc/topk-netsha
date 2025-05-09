@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <inttypes.h>
+#include <string.h>
 
 #define MAX_BATCH   1024
 #define HASH_SIZE   100003
@@ -26,6 +27,9 @@ int main() {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
 
+    char *mode = getenv("MODE");
+    if (!mode) mode = "aggr";
+
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in r_in = {
         .sin_family      = AF_INET,
@@ -39,19 +43,27 @@ int main() {
     uint32_t lat_cnt = 0;
 
     while (1) {
-        int n = recv(sock, buf, sizeof(buf), 0) / sizeof(topk_pkt_t);
+        int bytes = recv(sock, buf, sizeof(buf), 0);
+        if (bytes <= 0) continue;
+        int n = bytes / sizeof(topk_pkt_t);
+
         for (int i = 0; i < n; i++) {
             topk_pkt_t *p = &buf[i];
+            // 跳过 END_VALUE
+            if (p->value == END_VALUE) continue;
+
             int h = hash_key(p->query_id, p->seq_num);
             if (!seen[h]) {
                 seen[h] = 1;
                 uint64_t now = current_time_ns();
                 lat_sum += now - p->ts;
                 lat_cnt++;
-                printf("Q%u Seq%u Val%u\n", p->query_id, p->seq_num, p->value);
+                printf("Q%u Seq%u Val%u\n",
+                       p->query_id, p->seq_num, p->value);
                 if (lat_cnt == K_TARGET) {
                     fprintf(stderr,
-                        "[RECV-STAT] 平均一跳时延=%.2fms\n",
+                        "[%s-LATENCY] 平均一跳时延=%.2f ms\n",
+                        mode,
                         lat_sum * 1e-6 / lat_cnt);
                     return 0;
                 }
