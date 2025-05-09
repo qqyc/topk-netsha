@@ -1,0 +1,17 @@
+FROM ubuntu:22.04
+
+# RUN timedatectl set-timezone Asia/Shanghai'
+RUN apt update 
+
+RUN echo -e "6\n70\n" | apt install tzdata 
+RUN apt install sudo -y && sudo apt install vim \
+    iproute2 traceroute autoconf make gcc libpcap-dev \
+    openssh-server openssh-client ssh  iputils-ping net-tools \
+    tcpdump psmisc -y
+
+# CMD ["tail", "-f", "/dev/null"]
+
+WORKDIR /app
+COPY switch.c protocol.h Makefile ./
+RUN make switch
+CMD ["./switch"]

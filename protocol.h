@@ -1,0 +1,27 @@
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#include <stdint.h>
+
+#define QUERY_ID      1
+#define END_VALUE     0xFFFFFFFFu
+
+// GA 槽数、PA 槽数，以及目标 Top-K
+#define P             4
+#define Q             2
+#define K_TARGET      8
+
+#define SENDER_PORT   9000
+#define SWITCH_PORT   9000
+#define RECEIVER_PORT 9001
+
+#pragma pack(push,1)
+typedef struct {
+    uint32_t query_id;
+    uint32_t seq_num;
+    uint32_t value;
+    uint64_t ts;          // 纳秒级时间戳，用于时延测量
+} topk_pkt_t;
+#pragma pack(pop)
+
+#endif // PROTOCOL_H
