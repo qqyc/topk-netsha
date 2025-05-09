@@ -7,9 +7,9 @@
 #define END_VALUE     0xFFFFFFFFu
 
 // GA 槽数、PA 槽数，以及目标 Top-K
-#define P             10
-#define Q             5
-#define K_TARGET      20
+#define P             12
+#define Q             3
+#define K_TARGET      100
 
 #define SENDER_PORT   9000
 #define SWITCH_PORT   9000

@@ -12,6 +12,6 @@ RUN apt install sudo -y && sudo apt install vim \
 # CMD ["tail", "-f", "/dev/null"]
 
 WORKDIR /app
-COPY switch.c protocol.h Makefile slots_pq.inc slots_p.inc copy_p.inc clear_p.inc final_flush.inc ./
+COPY switch.c protocol.h Makefile slots_pq.inc slots_p.inc copy_p.inc clear_p.inc clear_pq.inc final_flush.inc ./
 RUN make switch
 CMD ["./switch"]

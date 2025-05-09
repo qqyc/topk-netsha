@@ -8,9 +8,17 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 
+
 P=$1
 Q=$2
-K=${3:-$(grep '#define K_TARGET' protocol.h | awk '{print $3}')}  # 若没给，就保留旧的
+K=${3:-$(
+  sed -n 's/^\s*#define\s\+K_TARGET\s\+\([0-9]\+\)/\1/p' protocol.h
+)} # 若没给，就保留旧的
+
+if [[ -z "$K" ]]; then
+  echo "❌ 无法从 protocol.h 提取 K_TARGET，请检查格式"
+  exit 1
+fi
 
 # slots_pq.inc: 生成 P+Q 槽的比较对 (i vs i-1)
 file_pq=slots_pq.inc
@@ -46,6 +54,14 @@ cat > clear_p.inc <<EOF
 EOF
 for ((i=0;i<P;i++)); do
   echo "X($i)" >> clear_p.inc
+done
+
+# clear_pq.inc: 生成清空前 P+Q 个槽的代码
+cat > clear_pq.inc <<EOF
+/* 自动生成：清空前 P+Q 个槽 */
+EOF
+for ((i=0;i<P+Q;i++)); do
+  echo "X($i)" >> clear_pq.inc
 done
 
 # final_flush.inc: 生成 Stage 2 最终 flush 逻辑

@@ -46,18 +46,20 @@ static void insert_slots_p(topk_pkt_t pkt) {
 
 // 批量转发 & 清空前 P 槽
 static void forward_and_clear(int sock, struct sockaddr_in *rcv) {
-    for (int i = 0; i < P; i++) {
-        outbuf[i] = slots[i];
-    }
+    // 1) 拷贝 slots -> outbuf
+    #define X(i) outbuf[i] = slots[i];
+    #include "copy_p.inc"
+    #undef X
     temp_T = outbuf[P-1].value;
+    // 2) 发送
     sendto(sock, outbuf, sizeof(outbuf), 0,
            (struct sockaddr*)rcv, sizeof(*rcv));
     sent += P;
     total_fwd_pkts += P;
-    // 清空前 P 个槽
-    for (int i = 0; i < P; i++) {
-        slots[i].value = END_VALUE;
-    }
+    // 2) 清空 slots
+    #define X(i) slots[i].value = END_VALUE;
+    #include "clear_p.inc"
+    #undef X
 }
 
 int main() {
@@ -81,9 +83,9 @@ int main() {
     bind(rsock, (void*)&sw_in, sizeof(sw_in));
 
     // 初始化所有 slots
-    for (int i = 0; i < P+Q; i++) {
-        slots[i].value = END_VALUE;
-    }
+    #define X(i) slots[i].value = END_VALUE;
+    #include "clear_pq.inc"
+    #undef X
 
     while (1) {
         // Bypass 模式：直通前 K_TARGET 个非 END 包后退出
@@ -117,9 +119,10 @@ int main() {
                 fprintf(stderr,"[SWITCH] 超时切换到 Stage 2\n");
                 fprintf(stderr,"[SWITCH] 当前阈值 T_final=%u\n", T_final);
                 stage = 2;
-                for (int i = 0; i < P+Q; i++) {
-                    slots[i].value = END_VALUE;
-                }
+                // 清空 slots[0..P+Q-1]
+                #define X(i) slots[i].value = END_VALUE;
+                #include "clear_pq.inc"
+                #undef X
                 continue;
             }
             if (ret < 0 && errno != EINTR) {
@@ -141,9 +144,9 @@ int main() {
             if (pkt.value == END_VALUE || sent >= K_TARGET) {
                 T_final = temp_T;
                 stage = 2;
-                for (int i = 0; i < P+Q; i++) {
-                    slots[i].value = END_VALUE;
-                }
+                #define X(i) slots[i].value = END_VALUE;
+                #include "clear_pq.inc"
+                #undef X
                 if (pkt.value == END_VALUE) {
                     continue;
                 }

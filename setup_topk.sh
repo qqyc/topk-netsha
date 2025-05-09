@@ -7,7 +7,9 @@ fi
 
 P=$1
 Q=$2
-K=${3:-$(grep '#define K_TARGET' protocol.h | awk '{print $3}')}  # 若没给，就保留旧的
+K=${3:-$(
+  sed -n 's/^\s*#define\s\+K_TARGET\s\+\([0-9]\+\)/\1/p' protocol.h
+)} # 若没给，就保留旧的
 
 ./gen_slots.sh $P $Q $K
 
